@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+# giữ nguyên các import của bạn; thêm statsmodels để chạy ADF/ZA
+from statsmodels.tsa.stattools import adfuller, zivot_andrews
+
+
+# === Cấu hình ===
+INPUT_PATH = r""
+OUTPUT_XLSX = r""
+
+
+# === Đọc dữ liệu ===
+df = pd.read_csv(INPUT_PATH)
+num_df = df.select_dtypes(include=[np.number])
+
+
+# === Tính ADF, ZA và điểm gãy ===
+t = pd.to_datetime(df["Time"])
+
+
+def star(p):
+   return "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
+
+
+rows = []
+for c in num_df.columns:  # ví dụ: EPU, CPI, INF_MoM, EPU_MoM
+   s = pd.Series(pd.to_numeric(df[c], errors="coerce").values, index=t).dropna()
+
+
+   adf_stat, adf_p, *_ = adfuller(s.values, autolag="AIC")
+   za_stat, za_p, *_ , bp = zivot_andrews(s.values, regression="c", autolag="AIC")
+
+
+   rows.append({
+       "Variable": c,
+       "ADF": f"{adf_stat:.2f}{star(adf_p)}",
+       "ZA": f"{za_stat:.2f}{star(za_p)}",
+       "Structural Break": s.index[int(bp)].strftime("%Y:%B")
+   })
+
+
+summary = pd.DataFrame(rows, columns=["Variable", "ADF", "ZA", "Structural Break"])
+
+
+# === In ra màn hình ===
+print(summary)
+
+
+# === Xuất ra Excel ===
+summary.to_excel(OUTPUT_XLSX, index=False, sheet_name="Summary")
+print(f"\n✅ File đã được lưu tại: {OUTPUT_XLSX}")
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+from scipy.stats import jarque_bera, skew, kurtosis
+from statsmodels.tsa.stattools import adfuller, zivot_andrews
+# === Cấu hình ===
+INPUT_PATH = r""
+OUTPUT_XLSX = r""
+
+
+# === Đọc dữ liệu ===
+df = pd.read_csv(INPUT_PATH)
+num_df = df.select_dtypes(include=[np.number])
+
+
+# === Tính thống kê mô tả ===
+rows = []
+for c in num_df.columns:
+   s = num_df[c].dropna().astype(float)
+   if len(s) < 3:
+       continue
+   jb_stat, jb_p = jarque_bera(s)
+   rows.append({
+       "Variable": c,
+       "Mean": round(s.mean(), 4),
+       "SD": round(s.std(ddof=1), 4),
+       "JB": f"{jb_stat:.4f} [{jb_p:.4f}]",
+       "Skewness": round(skew(s, bias=False), 4),
+       "Kurtosis": round(kurtosis(s, fisher=False, bias=False), 4)
+   })
+
+
+summary = pd.DataFrame(rows, columns=["Variable", "Mean", "SD", "JB", "Skewness", "Kurtosis"])
+
+
+# === In ra màn hình ===
+print(summary)
+
+
+# === Xuất ra Excel ===
+summary.to_excel(OUTPUT_XLSX, index=False, sheet_name="Summary")
+
+
+print(f"\n✅ File đã được lưu tại: {OUTPUT_XLSX}")
+
