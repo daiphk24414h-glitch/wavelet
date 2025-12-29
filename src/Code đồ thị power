@@ -1,0 +1,243 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import pywt
+
+
+# ================== (BỔ SUNG) HÀM MONTE-CARLO CIRCULAR-SHIFT ==================
+def _mc_circular_pvals_for_power(x, scales, wavelet, dt, n_perm=1000, seed=42, use_coi=True):
+   x = np.asarray(x, float)
+   x = x - np.nanmean(x)
+   n = len(x)
+
+
+   coef, freqs = pywt.cwt(x, scales, wavelet, dt)         # [n_scales, n_time]
+   power_obs = np.abs(coef) ** 2
+   period = 1.0 / np.maximum(freqs, 1e-12)
+
+
+   # COI mask nhất quán với cách vẽ hiện tại của bạn (dựa trên khoảng cách tới biên)
+   n_time = power_obs.shape[1]
+   t = np.arange(n_time) * dt
+   dist = np.minimum(np.arange(n_time), np.arange(n_time)[::-1]) * dt
+   # Trong code vẽ, bạn dùng "1.5 * dist" để vẽ đường cong COI
+   # Ta quy ước: ngoài COI khi PERIOD <= 1.5 * dist (tức nằm dưới đường cong)
+   coi_threshold = 1.5 * dist  # shape [n_time]
+   coi_mask = np.zeros_like(power_obs, dtype=bool)
+   for i in range(len(scales)):
+       coi_mask[i, :] = period[i] <= np.clip(coi_threshold, period.min(), period.max())
+
+
+   # Monte-Carlo circular-shift
+   rng = np.random.default_rng(seed)
+   ks = rng.integers(1, n, size=n_perm)
+   ge = np.zeros_like(power_obs, dtype=int)  # đếm số surrogate >= observed
+
+
+   for k in ks:
+       x_s = np.roll(x, k)
+       c_s, _ = pywt.cwt(x_s, scales, wavelet, dt)
+       p_s = np.abs(c_s) ** 2
+       ge += (p_s >= power_obs).astype(int)
+
+
+   pvals_mc = (ge + 1.0) / (n_perm + 1.0)
+   if use_coi:
+       pvals_mc = np.where(coi_mask, pvals_mc, np.nan)
+
+
+   return pvals_mc, None, freqs, period, power_obs, coi_mask
+
+
+
+
+# ================== (GIỮ NGUYÊN + BỔ SUNG TUỲ CHỌN MONTE-CARLO) ==============
+def plot_cwt_rstyle(series, wavelet='cmor1.5-1.0', dt=1.0,
+                  min_scale=2, max_scale=128, num_scales=64,
+                  title=None, out_path=None,
+                  cmap='jet', show_coi=True,
+                  # --------- (BỔ SUNG) TUỲ CHỌN MONTE-CARLO ----------
+                  mc_enable=True, n_perm=1000, alpha=0.05,
+                  mc_out_csv=None):
+
+
+
+
+  # --- Xử lý dữ liệu ---
+  x = series.values - np.nanmean(series.values)
+  t = np.arange(len(x)) * dt
+  n_time = len(t)
+
+
+
+
+  # --- Tạo scales và CWT ---
+  scales = np.linspace(min_scale, max_scale, num_scales)
+  coef, freqs = pywt.cwt(x, scales, wavelet, dt)
+  power = np.abs(coef) ** 2
+  period = 1.0 / freqs
+
+
+
+
+  # --- Biên độ theo log2 ---
+  power_log = np.log2(power + 1e-6)
+
+
+
+
+  # --- (BỔ SUNG) TÍNH p-VALUE MONTE-CARLO + MẶT NẠ Ý NGHĨA ---
+  pvals_mc = None
+  mask_sig = None
+  coi_mask = np.ones_like(power, dtype=bool)
+  if mc_enable:
+      pvals_mc, _, freqs_mc, period_mc, power_obs, coi_mask = _mc_circular_pvals_for_power(
+          x, scales, wavelet, dt, n_perm=n_perm, seed=42, use_coi=True
+      )
+      # p-value < alpha ⇒ có ý nghĩa
+      mask_sig = (pvals_mc < alpha)
+      # (tuỳ chọn) xuất CSV phẳng
+      if mc_out_csv is not None:
+          os.makedirs(os.path.dirname(mc_out_csv), exist_ok=True)
+          idx_scale = np.repeat(np.arange(len(scales)), n_time)
+          idx_time  = np.tile(np.arange(n_time), len(scales))
+          df_out = pd.DataFrame({
+              "scale_idx": idx_scale,
+              "time_idx": idx_time,
+              "scale": scales[idx_scale],
+              "freq": freqs[idx_scale],
+              "period": period[idx_scale],
+              "power": power.ravel(),
+              "p_mc": (pvals_mc.ravel() if pvals_mc is not None else np.nan),
+              "sig_mc": (mask_sig.ravel().astype(int) if mask_sig is not None else 0)
+          })
+          df_out.to_csv(mc_out_csv, index=False)
+
+
+
+
+  # --- Tạo figure ---
+  fig, ax = plt.subplots(figsize=(9.5, 5))
+  extent = [t[0], t[-1], np.min(period), np.max(period)]
+
+
+
+
+  # --- Màu (jet) ---
+  im = ax.imshow(power_log, extent=extent, aspect='auto', origin='lower',
+                 cmap=cmap, interpolation='bilinear')
+
+
+
+
+  # --- Contour đường mức ---
+  levels = np.linspace(power_log.min(), power_log.max(), 10)
+  ax.contour(t, period, power_log, levels=levels, colors='k', linewidths=0.4, alpha=0.5)
+
+
+
+
+  # --- (BỔ SUNG) VẼ CONTOUR Ý NGHĨA MONTE-CARLO p<alpha ---
+  if mc_enable and (mask_sig is not None):
+      # Vẽ viền trắng đứt nét cho vùng có ý nghĩa (ngoài COI)
+      # Lưu ý: mask_sig đang cùng shape với (scale×time); ta cần contour theo (t, period)
+      ax.contour(t, period, mask_sig.astype(float), levels=[0.5],
+                 colors='white', linewidths=1.2, linestyles='--')
+
+
+
+
+  # --- Log scale trục Y ---
+  ax.set_yscale('log', base=2)
+  ax.set_ylabel("Period (months)")
+  ax.set_xlabel("Time")
+  ax.set_title(title if title else "Continuous wavelet transform", fontsize=12, weight='bold')
+
+
+
+
+  # --- Màu & colorbar ---
+  cbar = plt.colorbar(im, ax=ax, orientation='vertical')
+  cbar.set_label('Wavelet Power (log₂ scale)')
+
+
+
+
+  # --- Nhãn trục X theo năm ---
+  ticks = np.linspace(0, n_time - 1, 6).astype(int)
+  ax.set_xticks(ticks)
+  labels = pd.to_datetime(series.index).strftime('%Y')
+  ax.set_xticklabels(labels[ticks], rotation=0)
+
+
+
+
+  # --- Vẽ Cone of Influence (COI) chuẩn hình R ---
+  if show_coi:
+      # Độ sâu cong tỷ lệ 1.5 để giống R
+      dist = np.minimum(np.arange(n_time), np.arange(n_time)[::-1]) * dt
+      coi_curve = np.clip(1.5 * dist, period.min(), period.max())
+      ax.plot(t, coi_curve, color='k', lw=1.0)
+      ax.plot(t, coi_curve[::-1], color='k', lw=1.0)
+      # Tô vùng ngoài COI nhạt đi
+      ax.fill_between(t, coi_curve, period.max(), color='white', alpha=0.4, hatch='//', lw=0)
+
+
+
+
+  ax.invert_yaxis()  # R-style: scale lớn ở dưới
+  plt.tight_layout()
+
+
+
+
+  if out_path:
+      os.makedirs(os.path.dirname(out_path), exist_ok=True)
+      plt.savefig(out_path, dpi=180, bbox_inches='tight')
+      plt.close()
+      print(f"✅ Wavelet plot saved to: {os.path.abspath(out_path)}")
+      return os.path.abspath(out_path)
+  else:
+      plt.show()
+      return None
+
+
+
+
+# === Đọc dữ liệu ===
+df = pd.read_csv(
+  "/Users/phamhuuhien/Downloads/US.csv",
+  parse_dates=["Time"], index_col="Time"
+)
+df.columns = df.columns.str.strip()
+series = df["INF_MoM"].dropna()
+
+
+
+
+# === Xuất đồ thị ===
+OUTDIR = "/Users/phamhuuhien/PycharmProjects/Dulieu chứng khoán /.venv/te_outputs_notebook"
+os.makedirs(OUTDIR, exist_ok=True)
+out_file = os.path.join(OUTDIR, "CWT_INFMoM_USA_Rstyle.png")
+out_csv_mc = os.path.join(OUTDIR, "Kiểm định power INF_USA.csv")
+
+
+# --- GỌI HÀM (giữ nguyên mọi tham số cũ, chỉ bật Monte-Carlo) ---
+plot_cwt_rstyle(
+  series,
+  wavelet='cmor1.5-1.0',
+  dt=1.0,
+  min_scale=2,
+  max_scale=128,
+  num_scales=64,
+  title="Continuous wavelet transform: USA_INF",
+  out_path=out_file,
+  cmap='jet',      # giống màu R: xanh→vàng→đỏ
+  show_coi=True,
+  # ---- BẬT MONTE-CARLO ----
+  mc_enable=True, n_perm=1000, alpha=0.05,
+  mc_out_csv=out_csv_mc
+)
+
+
